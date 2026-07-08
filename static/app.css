@@ -289,10 +289,59 @@ button:hover,
   font-weight: 800;
 }
 
+.map-wrap {
+  position: relative;
+}
+
 #map {
   height: 570px;
   width: 100%;
   background: #0b1627;
+}
+
+.map-legend {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 10;
+  width: 260px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(7, 17, 31, 0.88);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+
+.legend-title {
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.legend-gradient {
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    #30123b,
+    #4145ab,
+    #2aa7d8,
+    #35d86b,
+    #f9e721,
+    #f36c21,
+    #7a0403
+  );
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .endpoint-card {

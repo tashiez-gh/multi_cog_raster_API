@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from rasterio.warp import transform_bounds
 import morecantile
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from rio_tiler.colormap import cmap
 from rio_tiler.io import COGReader
+
 
 
 # ============================================================
@@ -140,6 +142,36 @@ async def home(request: Request):
         },
     )
 
+def get_cog_geographic_bounds(cog) -> Tuple[float, float, float, float]:
+    """
+    Return bounds in EPSG:4326 for TileJSON.
+    Compatible with different rio-tiler versions.
+    """
+    bounds = cog.bounds
+
+    try:
+        dataset_crs = cog.dataset.crs
+    except Exception:
+        dataset_crs = None
+
+    if dataset_crs is None:
+        return tuple(bounds)
+
+    try:
+        if dataset_crs.to_epsg() == 4326:
+            return tuple(bounds)
+
+        return transform_bounds(
+            dataset_crs,
+            "EPSG:4326",
+            bounds[0],
+            bounds[1],
+            bounds[2],
+            bounds[3],
+            densify_pts=21,
+        )
+    except Exception:
+        return tuple(bounds)
 
 # ============================================================
 # Helpers
@@ -531,7 +563,6 @@ def cog_info(
         "info": info,
     }
 
-
 @app.get("/cog/tilejson.json")
 def tilejson(
     request: Request,
@@ -556,9 +587,10 @@ def tilejson(
 
     try:
         with COGReader(str(cog_path)) as cog:
-            bounds = cog.geographic_bounds
-            minzoom = cog.minzoom
-            maxzoom = cog.maxzoom
+            bounds = get_cog_geographic_bounds(cog)
+            minzoom = getattr(cog, "minzoom", 0)
+            maxzoom = getattr(cog, "maxzoom", 14)
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,

@@ -138,8 +138,31 @@
           <span id="layerBadge">No layer</span>
         </div>
 
-        <div id="map"></div>
-      </section>
+        <div class="map-wrap">
+
+    <div id="map"></div>
+
+    <div class="map-legend" id="mapLegend">
+
+      <div class="legend-title" id="legendTitle">Legend</div>
+
+      <div class="legend-gradient" id="legendGradient"></div>
+
+      <div class="legend-labels">
+
+        <span id="legendMin">-</span>
+
+        <span id="legendMid">-</span>
+
+        <span id="legendMax">-</span>
+
+      </div>
+
+    </div>
+
+  </div>
+
+</section>
 
       <section class="endpoint-card">
         <div class="endpoint-header">
@@ -317,10 +340,13 @@ map.addLayer({
           option.textContent = `${dataset.title} (${dataset.name})`;
           option.dataset.variable = dataset.variable;
           option.dataset.unit = dataset.unit;
+          option.dataset.displayUnit = dataset.display_unit || dataset.unit;
+          option.dataset.valueOffset = dataset.value_offset || 0;
           option.dataset.rescaleMin = dataset.default_rescale[0];
           option.dataset.rescaleMax = dataset.default_rescale[1];
           option.dataset.colormap = dataset.default_colormap;
-          select.appendChild(option);
+
+select.appendChild(option);
         });
 
         document.getElementById("datasetCount").textContent = datasets.length;
@@ -342,6 +368,36 @@ map.addLayer({
       document.getElementById("rescaleMin").value = selectedOption.dataset.rescaleMin || 0;
       document.getElementById("rescaleMax").value = selectedOption.dataset.rescaleMax || 300;
       document.getElementById("colormapSelect").value = selectedOption.dataset.colormap || "turbo";
+    }
+    function updateLegend(config) {
+      const select = document.getElementById("datasetSelect");
+      const selectedOption = select.options[select.selectedIndex];
+
+      const displayUnit = selectedOption.dataset.displayUnit || "";
+      const valueOffset = Number(selectedOption.dataset.valueOffset || 0);
+
+      const rawMin = Number(config.minValue);
+      const rawMax = Number(config.maxValue);
+      const rawMid = (rawMin + rawMax) / 2;
+
+      const displayMin = rawMin + valueOffset;
+      const displayMid = rawMid + valueOffset;
+      const displayMax = rawMax + valueOffset;
+
+      const formatValue = (value) => {
+        if (displayUnit === "°C") {
+          return `${value.toFixed(1)} ${displayUnit}`;
+        }
+
+        return `${Math.round(value)} ${displayUnit}`;
+      };
+
+      document.getElementById("legendTitle").textContent =
+        `${config.dataset} value scale`;
+
+      document.getElementById("legendMin").textContent = formatValue(displayMin);
+      document.getElementById("legendMid").textContent = formatValue(displayMid);
+      document.getElementById("legendMax").textContent = formatValue(displayMax);
     }
 
     function loadLayer() {
