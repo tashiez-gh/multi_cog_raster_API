@@ -73,10 +73,11 @@ MONTH_NAMES = {
     12: "December",
 }
 
-
 # ============================================================
 # App
 # ============================================================
+
+BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(
     title=APP_TITLE,
@@ -92,8 +93,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+app.mount(
+    "/static",
+    StaticFiles(directory=str(BASE_DIR / "static")),
+    name="static",
+)
+
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse(
+        name="index.html",
+        request=request,
+        context={
+            "title": APP_TITLE,
+        },
+    )
 
 
 # ============================================================
