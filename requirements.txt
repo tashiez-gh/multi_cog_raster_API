@@ -6,3 +6,7 @@ morecantile
 rasterio
 numpy
 pillow
+titiler.application
+rio-tiler
+pydantic
+python-multipart
