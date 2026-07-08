@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>{{ title }}</title>
+
+  <link rel="stylesheet" href="/static/app.css" />
+
+  <link
+    href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    rel="stylesheet"
+  />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+</head>
+
+<body>
+  <div class="page-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">COG</div>
+        <div>
+          <h1>Multi COG Raster API</h1>
+          <p>Climate raster tile service</p>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h2>Service Status</h2>
+        <div class="status-card">
+          <span class="status-dot"></span>
+          <div>
+            <strong>API Online</strong>
+            <p id="apiBase">Loading...</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Layer Explorer</h2>
+
+        <label for="datasetSelect">Dataset</label>
+        <select id="datasetSelect">
+          <option value="">Loading datasets...</option>
+        </select>
+
+        <label for="monthSelect">Month</label>
+        <select id="monthSelect">
+          <option value="1">January</option>
+          <option value="2">February</option>
+          <option value="3">March</option>
+          <option value="4">April</option>
+          <option value="5">May</option>
+          <option value="6">June</option>
+          <option value="7">July</option>
+          <option value="8">August</option>
+          <option value="9">September</option>
+          <option value="10">October</option>
+          <option value="11">November</option>
+          <option value="12">December</option>
+        </select>
+
+        <label for="colormapSelect">Colormap</label>
+        <select id="colormapSelect">
+          <option value="turbo">turbo</option>
+          <option value="viridis">viridis</option>
+          <option value="plasma">plasma</option>
+          <option value="inferno">inferno</option>
+          <option value="magma">magma</option>
+        </select>
+
+        <div class="grid-2">
+          <div>
+            <label for="rescaleMin">Min</label>
+            <input id="rescaleMin" type="number" value="0" />
+          </div>
+          <div>
+            <label for="rescaleMax">Max</label>
+            <input id="rescaleMax" type="number" value="300" />
+          </div>
+        </div>
+
+        <button id="loadLayerBtn">Load Layer</button>
+      </section>
+
+      <section class="panel">
+        <h2>API Links</h2>
+        <a href="/docs" target="_blank">Swagger API Docs</a>
+        <a href="/layers" target="_blank">Layer Catalog</a>
+        <a href="/datasets" target="_blank">Dataset List</a>
+        <a href="/service" target="_blank">Service Metadata</a>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Raster tile API</p>
+          <h2>Cloud Optimized GeoTIFF Explorer</h2>
+          <p>
+            Preview monthly rainfall and temperature COG layers, then copy the tile API
+            endpoint for MapLibre, Leaflet, OpenLayers, or another frontend application.
+          </p>
+        </div>
+
+        <div class="hero-actions">
+          <a href="/docs" target="_blank">Open Docs</a>
+          <a href="/layers" target="_blank" class="secondary">View Layers</a>
+        </div>
+      </header>
+
+      <section class="summary-grid">
+        <div class="metric-card">
+          <span>Datasets</span>
+          <strong id="datasetCount">-</strong>
+        </div>
+        <div class="metric-card">
+          <span>Months</span>
+          <strong>12</strong>
+        </div>
+        <div class="metric-card">
+          <span>Tile Scheme</span>
+          <strong>XYZ</strong>
+        </div>
+        <div class="metric-card">
+          <span>Format</span>
+          <strong>PNG</strong>
+        </div>
+      </section>
+
+      <section class="map-card">
+        <div class="map-header">
+          <div>
+            <h3 id="activeLayerTitle">Map Preview</h3>
+            <p id="activeLayerSubtitle">Select a dataset and click Load Layer.</p>
+          </div>
+          <span id="layerBadge">No layer</span>
+        </div>
+
+        <div id="map"></div>
+      </section>
+
+      <section class="endpoint-card">
+        <div class="endpoint-header">
+          <div>
+            <h3>Generated API Access</h3>
+            <p>
+              Use the tile URL template in your real frontend map. The example tile opens one PNG tile image.
+            </p>
+          </div>
+        </div>
+
+        <div class="api-actions">
+          <button id="copyTileTemplateBtn">Copy Tile URL Template</button>
+          <button id="copyExampleTileBtn">Copy Example Tile URL</button>
+          <button id="openExampleTileBtn">Open Example Tile</button>
+          <button id="copyTileJsonBtn">Copy TileJSON URL</button>
+        </div>
+
+        <div class="endpoint-block">
+          <label>Tile URL Template</label>
+          <code id="tileTemplateEndpoint">No tile endpoint generated yet.</code>
+        </div>
+
+        <div class="endpoint-block">
+          <label>Example Tile Image URL</label>
+          <code id="exampleTileEndpoint">No example tile generated yet.</code>
+        </div>
+
+        <div class="endpoint-block">
+          <label>TileJSON URL</label>
+          <code id="tileJsonEndpoint">No TileJSON endpoint generated yet.</code>
+        </div>
+
+        <div class="endpoint-block">
+          <label>MapLibre Usage Example</label>
+          <code id="frontendExample">No frontend example generated yet.</code>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast">Copied</div>
+
+  <script>
+    const apiBase = window.location.origin;
+
+    let currentTileTemplate = "";
+    let currentExampleTileUrl = "";
+    let currentTileJsonUrl = "";
+
+    document.getElementById("apiBase").textContent = apiBase;
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: {
+        version: 8,
+        sources: {
+          osm: {
+            type: "raster",
+            tiles: [
+              "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+            ],
+            tileSize: 256,
+            attribution: "© OpenStreetMap contributors"
+          }
+        },
+        layers: [
+          {
+            id: "osm",
+            type: "raster",
+            source: "osm"
+          }
+        ]
+      },
+      center: [100.8, 15.8],
+      zoom: 5
+    });
+
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    function showToast(message) {
+      const toast = document.getElementById("toast");
+      toast.textContent = message;
+      toast.classList.add("show");
+
+      setTimeout(() => {
+        toast.classList.remove("show");
+      }, 1800);
+    }
+
+    async function copyText(text) {
+      if (!text) {
+        alert("Please load a layer first.");
+        return;
+      }
+
+      await navigator.clipboard.writeText(text);
+      showToast("Copied to clipboard");
+    }
+
+    function getSelectedConfig() {
+      const dataset = document.getElementById("datasetSelect").value;
+      const month = document.getElementById("monthSelect").value;
+      const colormap = document.getElementById("colormapSelect").value;
+      const minValue = document.getElementById("rescaleMin").value;
+      const maxValue = document.getElementById("rescaleMax").value;
+
+      return {
+        dataset,
+        month,
+        colormap,
+        minValue,
+        maxValue,
+        rescale: `${minValue},${maxValue}`
+      };
+    }
+
+    function buildTileTemplateUrl(config) {
+      return `${apiBase}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
+    }
+
+    function buildExampleTileUrl(config) {
+      // Example tile around Thailand.
+      return `${apiBase}/cog/tiles/WebMercatorQuad/5/25/14.png?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
+    }
+
+    function buildTileJsonUrl(config) {
+      return `${apiBase}/cog/tilejson.json?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
+    }
+
+    function buildFrontendExample(tileTemplate) {
+      return `map.addSource("climate-cog-source", {
+  type: "raster",
+  tiles: [
+    "${tileTemplate}"
+  ],
+  tileSize: 256
+});
+
+map.addLayer({
+  id: "climate-cog-layer",
+  type: "raster",
+  source: "climate-cog-source",
+  paint: {
+    "raster-opacity": 0.75
+  }
+});`;
+    }
+
+    function updateApiOutput(config) {
+      currentTileTemplate = buildTileTemplateUrl(config);
+      currentExampleTileUrl = buildExampleTileUrl(config);
+      currentTileJsonUrl = buildTileJsonUrl(config);
+
+      document.getElementById("tileTemplateEndpoint").textContent = currentTileTemplate;
+      document.getElementById("exampleTileEndpoint").textContent = currentExampleTileUrl;
+      document.getElementById("tileJsonEndpoint").textContent = currentTileJsonUrl;
+      document.getElementById("frontendExample").textContent = buildFrontendExample(currentTileTemplate);
+    }
+
+    async function loadDatasets() {
+      const select = document.getElementById("datasetSelect");
+
+      try {
+        const response = await fetch("/datasets");
+        const data = await response.json();
+
+        const datasets = data.datasets || [];
+
+        select.innerHTML = "";
+
+        datasets.forEach((dataset) => {
+          const option = document.createElement("option");
+          option.value = dataset.name;
+          option.textContent = `${dataset.title} (${dataset.name})`;
+          option.dataset.variable = dataset.variable;
+          option.dataset.unit = dataset.unit;
+          option.dataset.rescaleMin = dataset.default_rescale[0];
+          option.dataset.rescaleMax = dataset.default_rescale[1];
+          option.dataset.colormap = dataset.default_colormap;
+          select.appendChild(option);
+        });
+
+        document.getElementById("datasetCount").textContent = datasets.length;
+
+        updateDefaultsFromDataset();
+
+      } catch (error) {
+        console.error(error);
+        select.innerHTML = "<option value=''>Cannot load datasets</option>";
+      }
+    }
+
+    function updateDefaultsFromDataset() {
+      const select = document.getElementById("datasetSelect");
+      const selectedOption = select.options[select.selectedIndex];
+
+      if (!selectedOption) return;
+
+      document.getElementById("rescaleMin").value = selectedOption.dataset.rescaleMin || 0;
+      document.getElementById("rescaleMax").value = selectedOption.dataset.rescaleMax || 300;
+      document.getElementById("colormapSelect").value = selectedOption.dataset.colormap || "turbo";
+    }
+
+    function loadLayer() {
+      const config = getSelectedConfig();
+
+      if (!config.dataset) {
+        alert("Please select a dataset first.");
+        return;
+      }
+
+      const tileTemplate = buildTileTemplateUrl(config);
+
+      if (map.getLayer("cog-layer")) {
+        map.removeLayer("cog-layer");
+      }
+
+      if (map.getSource("cog-source")) {
+        map.removeSource("cog-source");
+      }
+
+      map.addSource("cog-source", {
+        type: "raster",
+        tiles: [tileTemplate],
+        tileSize: 256
+      });
+
+      map.addLayer({
+        id: "cog-layer",
+        type: "raster",
+        source: "cog-source",
+        paint: {
+          "raster-opacity": 0.75
+        }
+      });
+
+      updateApiOutput(config);
+
+      document.getElementById("activeLayerTitle").textContent = config.dataset;
+      document.getElementById("activeLayerSubtitle").textContent =
+        `Month ${config.month}, colormap ${config.colormap}, rescale ${config.minValue}-${config.maxValue}`;
+
+      document.getElementById("layerBadge").textContent = `Month ${config.month}`;
+    }
+
+    document.getElementById("datasetSelect").addEventListener("change", updateDefaultsFromDataset);
+    document.getElementById("loadLayerBtn").addEventListener("click", loadLayer);
+
+    document.getElementById("copyTileTemplateBtn").addEventListener("click", () => {
+      copyText(currentTileTemplate);
+    });
+
+    document.getElementById("copyExampleTileBtn").addEventListener("click", () => {
+      copyText(currentExampleTileUrl);
+    });
+
+    document.getElementById("copyTileJsonBtn").addEventListener("click", () => {
+      copyText(currentTileJsonUrl);
+    });
+
+    document.getElementById("openExampleTileBtn").addEventListener("click", () => {
+      if (!currentExampleTileUrl) {
+        alert("Please load a layer first.");
+        return;
+      }
+
+      window.open(currentExampleTileUrl, "_blank");
+    });
+
+    loadDatasets();
+  </script>
+</body>
+</html>

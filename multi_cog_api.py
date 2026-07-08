@@ -1,31 +1,87 @@
+import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
+import morecantile
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-
-from titiler.core.factory import TilerFactory
-from titiler.core.errors import DEFAULT_STATUS_CODES, add_exception_handlers
+from fastapi.responses import HTMLResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from rio_tiler.colormap import cmap
+from rio_tiler.io import COGReader
 
 
 # ============================================================
-# CONFIG
+# Config
 # ============================================================
 
-# Change this path to the parent folder that contains your 4 COG dataset folders.
+APP_TITLE = "Multi COG Raster API"
+APP_VERSION = "1.0.0"
+
+# Render-safe path.
+# Default expects:
+# data/output/{dataset_name}/*.tif
 COG_ROOT = Path("/Users/tatar/Athentic/69/DCCE_69/script/output/")
 
-API_BASE_URL = "http://localhost:8001"
+# Optional. If empty, UI and API use current domain automatically.
+API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
+
+SUPPORTED_DATASETS = {
+    "rainfall_ssp245_cog": {
+        "title": "Rainfall SSP2-4.5",
+        "variable": "rainfall",
+        "unit": "mm",
+        "default_rescale": [0, 300],
+        "default_colormap": "turbo",
+    },
+    "rainfall_ssp585_cog": {
+        "title": "Rainfall SSP5-8.5",
+        "variable": "rainfall",
+        "unit": "mm",
+        "default_rescale": [0, 300],
+        "default_colormap": "turbo",
+    },
+    "tasmax_ssp245_cog": {
+        "title": "Max Temperature SSP2-4.5",
+        "variable": "tasmax",
+        "unit": "°C",
+        "default_rescale": [20, 45],
+        "default_colormap": "turbo",
+    },
+    "tasmax_ssp585_cog": {
+        "title": "Max Temperature SSP5-8.5",
+        "variable": "tasmax",
+        "unit": "°C",
+        "default_rescale": [20, 45],
+        "default_colormap": "turbo",
+    },
+}
+
+MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
 
 
 # ============================================================
-# FASTAPI APP
+# App
 # ============================================================
 
 app = FastAPI(
-    title="Multi COG Raster API",
-    description="COG catalog API + TiTiler tile API",
-    version="1.0.0",
+    title=APP_TITLE,
+    version=APP_VERSION,
+    description="FastAPI service for serving monthly Cloud Optimized GeoTIFF raster tiles.",
 )
 
 app.add_middleware(
@@ -36,243 +92,525 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ============================================================
-# ADD TITILER COG ENDPOINTS
-# ============================================================
-
-cog = TilerFactory(router_prefix="/cog")
-app.include_router(cog.router, prefix="/cog", tags=["COG"])
-add_exception_handlers(app, DEFAULT_STATUS_CODES)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 # ============================================================
-# HELPERS
+# Helpers
 # ============================================================
 
-MONTH_LOOKUP = {
-    "01_jan": "January",
-    "02_feb": "February",
-    "03_mar": "March",
-    "04_apr": "April",
-    "05_may": "May",
-    "06_jun": "June",
-    "07_jul": "July",
-    "08_aug": "August",
-    "09_sep": "September",
-    "10_oct": "October",
-    "11_nov": "November",
-    "12_dec": "December",
-}
+def get_public_base_url(request: Optional[Request] = None) -> str:
+    if API_BASE_URL:
+        return API_BASE_URL
+
+    if request:
+        return str(request.base_url).rstrip("/")
+
+    return ""
 
 
-def extract_month(filename: str) -> Optional[str]:
-    lower_name = filename.lower()
-
-    for key, month_name in MONTH_LOOKUP.items():
-        if key in lower_name:
-            return month_name
-
-    return None
-
-
-def guess_variable(filename: str, dataset_name: str) -> str:
-    text = f"{filename} {dataset_name}".lower()
-
-    if "pr_" in text or "rain" in text or "precip" in text:
-        return "rainfall"
-
-    if "tasmax" in text:
-        return "tasmax"
-
-    if "tasmin" in text:
-        return "tasmin"
-
-    if "temp" in text:
-        return "temperature"
-
-    return "raster"
+def validate_dataset(dataset: str) -> None:
+    if dataset not in SUPPORTED_DATASETS:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Dataset '{dataset}' is not supported.",
+                "available_datasets": list(SUPPORTED_DATASETS.keys()),
+            },
+        )
 
 
-def guess_rescale(variable: str) -> str:
-    if variable == "rainfall":
-        return "0,300"
+def parse_rescale(rescale: Optional[str], dataset: str) -> Tuple[float, float]:
+    default_min, default_max = SUPPORTED_DATASETS[dataset]["default_rescale"]
 
-    if variable == "tasmax":
-        return "20,45"
+    if not rescale:
+        return float(default_min), float(default_max)
 
-    if variable == "tasmin":
-        return "10,30"
-
-    if variable == "temperature":
-        return "15,45"
-
-    return "0,1"
-
-
-def guess_colormap(variable: str) -> str:
-    if variable == "rainfall":
-        return "turbo"
-
-    if variable in ["tasmax", "tasmin", "temperature"]:
-        return "turbo"
-
-    return "viridis"
+    try:
+        parts = [float(x.strip()) for x in rescale.split(",")]
+        if len(parts) != 2:
+            raise ValueError
+        return parts[0], parts[1]
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid rescale value. Use format: min,max. Example: rescale=0,300",
+        )
 
 
-def build_tile_url(file_path: Path, rescale: str, colormap: str) -> str:
-    file_url = f"file://{file_path}"
+def find_month_cog(dataset: str, month: int) -> Path:
+    validate_dataset(dataset)
 
-    return (
-        f"{API_BASE_URL}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
-        f"?url={file_url}"
-        f"&bidx=1"
-        f"&rescale={rescale}"
-        f"&colormap_name={colormap}"
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="month must be between 1 and 12.")
+
+    dataset_dir = COG_ROOT / dataset
+
+    if not dataset_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"Dataset folder not found: {dataset_dir}",
+                "hint": "Check your COG_ROOT environment variable and repository data/output folder.",
+            },
+        )
+
+    tif_files = sorted(
+        list(dataset_dir.glob("*.tif"))
+        + list(dataset_dir.glob("*.tiff"))
+        + list(dataset_dir.glob("*.TIF"))
+        + list(dataset_dir.glob("*.TIFF"))
+    )
+
+    if not tif_files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No GeoTIFF or COG files found in {dataset_dir}",
+        )
+
+    month_patterns = [
+        f"month_{month}",
+        f"month{month}",
+        f"m{month}",
+        f"_{month}_",
+        f"_{month:02d}_",
+        f"-{month}-",
+        f"-{month:02d}-",
+        f"{month:02d}",
+    ]
+
+    # Prefer filename match.
+    for tif in tif_files:
+        stem = tif.stem.lower()
+        if any(pattern in stem for pattern in month_patterns):
+            return tif
+
+    # Fallback: if there are exactly 12 files, use sorted order.
+    if len(tif_files) >= 12:
+        return tif_files[month - 1]
+
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "message": f"Cannot find month {month} COG for dataset '{dataset}'.",
+            "hint": "Use filenames containing month number, or keep exactly 12 sorted monthly COG files in each dataset folder.",
+            "available_files": [f.name for f in tif_files],
+        },
     )
 
 
-def scan_layers() -> List[Dict]:
-    if not COG_ROOT.exists():
+def get_available_months(dataset: str) -> List[Dict]:
+    validate_dataset(dataset)
+
+    months = []
+
+    for month in range(1, 13):
+        try:
+            path = find_month_cog(dataset, month)
+            months.append(
+                {
+                    "month": month,
+                    "name": MONTH_NAMES[month],
+                    "available": True,
+                    "filename": path.name,
+                }
+            )
+        except HTTPException:
+            months.append(
+                {
+                    "month": month,
+                    "name": MONTH_NAMES[month],
+                    "available": False,
+                    "filename": None,
+                }
+            )
+
+    return months
+
+
+def get_colormap(colormap_name: str):
+    try:
+        return cmap.get(colormap_name)
+    except Exception:
         raise HTTPException(
-            status_code=404,
-            detail=f"COG_ROOT not found: {COG_ROOT}",
+            status_code=400,
+            detail={
+                "message": f"Invalid colormap_name: {colormap_name}",
+                "examples": ["turbo", "viridis", "plasma", "inferno", "magma"],
+            },
         )
 
-    tif_files = sorted(list(COG_ROOT.rglob("*.tif")))
 
-    layers = []
+def build_tile_url(
+    request: Request,
+    dataset: str,
+    month: int,
+    rescale: str,
+    colormap_name: str,
+) -> str:
+    base_url = get_public_base_url(request)
+    return (
+        f"{base_url}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
+        f"?dataset={dataset}"
+        f"&month={month}"
+        f"&rescale={rescale}"
+        f"&colormap_name={colormap_name}"
+    )
 
-    for tif_path in tif_files:
-        dataset_name = tif_path.parent.name
-        filename = tif_path.name
-        variable = guess_variable(filename, dataset_name)
-        month = extract_month(filename)
 
-        rescale = guess_rescale(variable)
-        colormap = guess_colormap(variable)
+def build_example_tile_url(
+    request: Request,
+    dataset: str,
+    month: int,
+    rescale: str,
+    colormap_name: str,
+) -> str:
+    base_url = get_public_base_url(request)
 
-        layer_id = f"{dataset_name}__{tif_path.stem}"
-
-        layers.append(
-            {
-                "id": layer_id,
-                "dataset": dataset_name,
-                "name": tif_path.stem,
-                "filename": filename,
-                "variable": variable,
-                "month": month,
-                "path": str(tif_path),
-                "url": f"file://{tif_path}",
-                "tile_url": build_tile_url(tif_path, rescale, colormap),
-                "info_url": f"{API_BASE_URL}/cog/info?url=file://{tif_path}",
-                "preview_url": (
-                    f"{API_BASE_URL}/cog/preview.png"
-                    f"?url=file://{tif_path}"
-                    f"&bidx=1"
-                    f"&rescale={rescale}"
-                    f"&colormap_name={colormap}"
-                    f"&max_size=1024"
-                ),
-                "render": {
-                    "bidx": 1,
-                    "rescale": rescale,
-                    "colormap_name": colormap,
-                    "tile_size": 256,
-                },
-            }
-        )
-
-    return layers
+    # Example tile around Thailand.
+    return (
+        f"{base_url}/cog/tiles/WebMercatorQuad/5/25/14.png"
+        f"?dataset={dataset}"
+        f"&month={month}"
+        f"&rescale={rescale}"
+        f"&colormap_name={colormap_name}"
+    )
 
 
 # ============================================================
-# CUSTOM CATALOG ENDPOINTS
+# UI
 # ============================================================
 
-@app.get("/")
-def root():
-    return {
-        "message": "Multi COG API is running",
-        "docs": f"{API_BASE_URL}/docs",
-        "layers": f"{API_BASE_URL}/layers",
-        "datasets": f"{API_BASE_URL}/datasets",
-        "cog_info": f"{API_BASE_URL}/cog/info?url=file:///path/to/file.tif",
-    }
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "title": APP_TITLE,
+        },
+    )
 
+
+# ============================================================
+# Health / Metadata
+# ============================================================
 
 @app.get("/health")
 def health():
     return {
         "status": "ok",
+        "message": "Multi COG API is running",
         "cog_root": str(COG_ROOT),
-        "cog_root_exists": COG_ROOT.exists(),
     }
 
 
-@app.get("/layers")
-def list_layers():
-    return scan_layers()
+@app.get("/service")
+def service_info(request: Request):
+    base_url = get_public_base_url(request)
+
+    return {
+        "message": "Multi COG API is running",
+        "version": APP_VERSION,
+        "base_url": base_url,
+        "docs": f"{base_url}/docs",
+        "layers": f"{base_url}/layers",
+        "datasets": f"{base_url}/datasets",
+        "example_tile": f"{base_url}/cog/tiles/WebMercatorQuad/5/25/14.png?dataset=rainfall_ssp245_cog&month=1&rescale=0,300&colormap_name=turbo",
+    }
 
 
 @app.get("/datasets")
 def list_datasets():
-    layers = scan_layers()
+    items = []
 
-    dataset_names = sorted(set(layer["dataset"] for layer in layers))
+    for dataset_name, config in SUPPORTED_DATASETS.items():
+        dataset_dir = COG_ROOT / dataset_name
+        exists = dataset_dir.exists()
 
-    result = []
+        tif_count = 0
+        if exists:
+            tif_count = len(
+                list(dataset_dir.glob("*.tif"))
+                + list(dataset_dir.glob("*.tiff"))
+                + list(dataset_dir.glob("*.TIF"))
+                + list(dataset_dir.glob("*.TIFF"))
+            )
 
-    for dataset_name in dataset_names:
-        dataset_layers = [
-            layer for layer in layers
-            if layer["dataset"] == dataset_name
-        ]
-
-        result.append(
+        items.append(
             {
-                "dataset": dataset_name,
-                "layer_count": len(dataset_layers),
-                "variables": sorted(set(layer["variable"] for layer in dataset_layers)),
-                "months": [
-                    layer["month"]
-                    for layer in dataset_layers
-                    if layer["month"] is not None
-                ],
-                "layers_url": f"{API_BASE_URL}/datasets/{dataset_name}/layers",
+                "name": dataset_name,
+                "title": config["title"],
+                "variable": config["variable"],
+                "unit": config["unit"],
+                "default_rescale": config["default_rescale"],
+                "default_colormap": config["default_colormap"],
+                "folder_exists": exists,
+                "file_count": tif_count,
             }
         )
 
-    return result
+    return {
+        "cog_root": str(COG_ROOT),
+        "count": len(items),
+        "datasets": items,
+    }
 
 
-@app.get("/datasets/{dataset_name}/layers")
-def list_dataset_layers(dataset_name: str):
-    layers = scan_layers()
+@app.get("/layers")
+def list_layers(request: Request):
+    layers = []
 
-    filtered = [
-        layer for layer in layers
-        if layer["dataset"] == dataset_name
-    ]
+    for dataset_name, config in SUPPORTED_DATASETS.items():
+        months = get_available_months(dataset_name)
 
-    if not filtered:
+        for month_item in months:
+            if not month_item["available"]:
+                continue
+
+            rescale_min, rescale_max = config["default_rescale"]
+            rescale = f"{rescale_min},{rescale_max}"
+            colormap_name = config["default_colormap"]
+
+            layers.append(
+                {
+                    "id": f"{dataset_name}_month_{month_item['month']:02d}",
+                    "dataset": dataset_name,
+                    "title": config["title"],
+                    "variable": config["variable"],
+                    "unit": config["unit"],
+                    "month": month_item["month"],
+                    "month_name": month_item["name"],
+                    "filename": month_item["filename"],
+                    "default_rescale": config["default_rescale"],
+                    "default_colormap": colormap_name,
+                    "tile_url_template": build_tile_url(
+                        request=request,
+                        dataset=dataset_name,
+                        month=month_item["month"],
+                        rescale=rescale,
+                        colormap_name=colormap_name,
+                    ),
+                    "example_tile_url": build_example_tile_url(
+                        request=request,
+                        dataset=dataset_name,
+                        month=month_item["month"],
+                        rescale=rescale,
+                        colormap_name=colormap_name,
+                    ),
+                }
+            )
+
+    return {
+        "count": len(layers),
+        "layers": layers,
+    }
+
+
+@app.get("/layers/{dataset}")
+def dataset_layers(dataset: str, request: Request):
+    validate_dataset(dataset)
+
+    config = SUPPORTED_DATASETS[dataset]
+    months = get_available_months(dataset)
+
+    rescale_min, rescale_max = config["default_rescale"]
+    rescale = f"{rescale_min},{rescale_max}"
+    colormap_name = config["default_colormap"]
+
+    return {
+        "dataset": dataset,
+        "title": config["title"],
+        "variable": config["variable"],
+        "unit": config["unit"],
+        "default_rescale": config["default_rescale"],
+        "default_colormap": config["default_colormap"],
+        "months": [
+            {
+                **month_item,
+                "tile_url_template": build_tile_url(
+                    request=request,
+                    dataset=dataset,
+                    month=month_item["month"],
+                    rescale=rescale,
+                    colormap_name=colormap_name,
+                )
+                if month_item["available"]
+                else None,
+                "example_tile_url": build_example_tile_url(
+                    request=request,
+                    dataset=dataset,
+                    month=month_item["month"],
+                    rescale=rescale,
+                    colormap_name=colormap_name,
+                )
+                if month_item["available"]
+                else None,
+            }
+            for month_item in months
+        ],
+    }
+
+
+# ============================================================
+# COG endpoints
+# ============================================================
+
+@app.get("/cog/info")
+def cog_info(
+    dataset: str = Query(..., description="Dataset name"),
+    month: int = Query(..., ge=1, le=12, description="Month number 1-12"),
+):
+    cog_path = find_month_cog(dataset, month)
+
+    try:
+        with COGReader(str(cog_path)) as cog:
+            info = cog.info()
+            bounds = cog.bounds
+            geographic_bounds = cog.geographic_bounds
+    except Exception as exc:
         raise HTTPException(
-            status_code=404,
-            detail=f"Dataset not found: {dataset_name}",
+            status_code=500,
+            detail=f"Cannot read COG info: {str(exc)}",
         )
 
-    return filtered
+    return {
+        "dataset": dataset,
+        "month": month,
+        "month_name": MONTH_NAMES[month],
+        "filename": cog_path.name,
+        "path": str(cog_path),
+        "bounds": bounds,
+        "geographic_bounds": geographic_bounds,
+        "info": info,
+    }
 
 
-@app.get("/layers/{layer_id}")
-def get_layer(layer_id: str):
-    layers = scan_layers()
+@app.get("/cog/tilejson.json")
+def tilejson(
+    request: Request,
+    dataset: str = Query(..., description="Dataset name"),
+    month: int = Query(..., ge=1, le=12),
+    rescale: Optional[str] = Query(None, description="Example: 0,300"),
+    colormap_name: str = Query("turbo"),
+):
+    validate_dataset(dataset)
+    cog_path = find_month_cog(dataset, month)
 
-    for layer in layers:
-        if layer["id"] == layer_id:
-            return layer
+    rescale_min, rescale_max = parse_rescale(rescale, dataset)
+    rescale_text = f"{rescale_min},{rescale_max}"
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Layer not found: {layer_id}",
+    tile_url = build_tile_url(
+        request=request,
+        dataset=dataset,
+        month=month,
+        rescale=rescale_text,
+        colormap_name=colormap_name,
     )
+
+    try:
+        with COGReader(str(cog_path)) as cog:
+            bounds = cog.geographic_bounds
+            minzoom = cog.minzoom
+            maxzoom = cog.maxzoom
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot create TileJSON: {str(exc)}",
+        )
+
+    return {
+        "tilejson": "2.2.0",
+        "name": f"{dataset} - {MONTH_NAMES[month]}",
+        "version": APP_VERSION,
+        "scheme": "xyz",
+        "tiles": [tile_url],
+        "bounds": list(bounds),
+        "minzoom": minzoom,
+        "maxzoom": maxzoom,
+        "attribution": "Multi COG Raster API",
+    }
+
+
+@app.get("/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png")
+def cog_tile(
+    z: int,
+    x: int,
+    y: int,
+    dataset: str = Query(..., description="Dataset name"),
+    month: int = Query(..., ge=1, le=12),
+    rescale: Optional[str] = Query(None, description="Example: 0,300"),
+    colormap_name: str = Query("turbo"),
+    bidx: int = Query(1, ge=1, description="Band index. Default is 1."),
+):
+    cog_path = find_month_cog(dataset, month)
+    rescale_min, rescale_max = parse_rescale(rescale, dataset)
+    colormap = get_colormap(colormap_name)
+
+    try:
+        with COGReader(str(cog_path)) as cog:
+            image = cog.tile(x, y, z, indexes=bidx)
+
+            content = image.render(
+                img_format="PNG",
+                colormap=colormap,
+                rescale=((rescale_min, rescale_max),),
+            )
+
+        return Response(content=content, media_type="image/png")
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Cannot render tile.",
+                "dataset": dataset,
+                "month": month,
+                "z": z,
+                "x": x,
+                "y": y,
+                "error": str(exc),
+            },
+        )
+
+
+@app.get("/cog/preview-url")
+def preview_url(
+    request: Request,
+    dataset: str = Query(...),
+    month: int = Query(..., ge=1, le=12),
+    rescale: Optional[str] = Query(None),
+    colormap_name: str = Query("turbo"),
+):
+    validate_dataset(dataset)
+
+    rescale_min, rescale_max = parse_rescale(rescale, dataset)
+    rescale_text = f"{rescale_min},{rescale_max}"
+
+    return {
+        "dataset": dataset,
+        "month": month,
+        "month_name": MONTH_NAMES[month],
+        "tile_url_template": build_tile_url(
+            request=request,
+            dataset=dataset,
+            month=month,
+            rescale=rescale_text,
+            colormap_name=colormap_name,
+        ),
+        "example_tile_url": build_example_tile_url(
+            request=request,
+            dataset=dataset,
+            month=month,
+            rescale=rescale_text,
+            colormap_name=colormap_name,
+        ),
+        "tilejson_url": (
+            f"{get_public_base_url(request)}/cog/tilejson.json"
+            f"?dataset={dataset}"
+            f"&month={month}"
+            f"&rescale={rescale_text}"
+            f"&colormap_name={colormap_name}"
+        ),
+    }

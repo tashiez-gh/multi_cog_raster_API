@@ -1,8 +1,8 @@
 fastapi
 uvicorn[standard]
-titiler.application
+jinja2
 rio-tiler
-rasterio
 morecantile
-pydantic
-python-multipart
+rasterio
+numpy
+pillow
