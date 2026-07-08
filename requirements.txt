@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+titiler.application
+rio-tiler
+rasterio
+morecantile
+pydantic
+python-multipart
