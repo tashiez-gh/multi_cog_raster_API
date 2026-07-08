@@ -22,7 +22,7 @@ APP_VERSION = "1.0.0"
 # Render-safe path.
 # Default expects:
 # data/output/{dataset_name}/*.tif
-COG_ROOT = Path("/Users/tatar/Athentic/69/DCCE_69/script/output/")
+COG_ROOT = Path(os.getenv("COG_ROOT", "data/output")).resolve()
 
 # Optional. If empty, UI and API use current domain automatically.
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
