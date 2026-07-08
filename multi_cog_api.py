@@ -28,30 +28,58 @@ COG_ROOT = Path(os.getenv("COG_ROOT", "data/output")).resolve()
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 
 SUPPORTED_DATASETS = {
-    "rainfall_ssp245_cog": {
-        "title": "Rainfall SSP2-4.5",
+    "rain_ssp245_1540_p95_cog": {
+        "title": "Rainfall SSP2-4.5 2015-2040 P95",
         "variable": "rainfall",
         "unit": "mm",
         "default_rescale": [0, 300],
         "default_colormap": "turbo",
     },
-    "rainfall_ssp585_cog": {
-        "title": "Rainfall SSP5-8.5",
+    "rain_ssp245_4160_p95_cog": {
+        "title": "Rainfall SSP2-4.5 2041-2060 P95",
         "variable": "rainfall",
         "unit": "mm",
         "default_rescale": [0, 300],
         "default_colormap": "turbo",
     },
-    "tasmax_ssp245_cog": {
-        "title": "Max Temperature SSP2-4.5",
-        "variable": "tasmax",
+    "rain_ssp585_1540_p95_cog": {
+        "title": "Rainfall SSP5-8.5 2015-2040 P95",
+        "variable": "rainfall",
+        "unit": "mm",
+        "default_rescale": [0, 300],
+        "default_colormap": "turbo",
+    },
+    "rain_ssp585_4160_p95_cog": {
+        "title": "Rainfall SSP5-8.5 2041-2060 P95",
+        "variable": "rainfall",
+        "unit": "mm",
+        "default_rescale": [0, 300],
+        "default_colormap": "turbo",
+    },
+    "temp_ssp245_1540_p95_cog": {
+        "title": "Temperature SSP2-4.5 2015-2040 P95",
+        "variable": "temperature",
         "unit": "°C",
         "default_rescale": [20, 45],
         "default_colormap": "turbo",
     },
-    "tasmax_ssp585_cog": {
-        "title": "Max Temperature SSP5-8.5",
-        "variable": "tasmax",
+    "temp_ssp245_4160_p95_cog": {
+        "title": "Temperature SSP2-4.5 2041-2060 P95",
+        "variable": "temperature",
+        "unit": "°C",
+        "default_rescale": [20, 45],
+        "default_colormap": "turbo",
+    },
+    "temp_ssp585_1540_p95_cog": {
+        "title": "Temperature SSP5-8.5 2015-2040 P95",
+        "variable": "temperature",
+        "unit": "°C",
+        "default_rescale": [20, 45],
+        "default_colormap": "turbo",
+    },
+    "temp_ssp585_4160_p95_cog": {
+        "title": "Temperature SSP5-8.5 2041-2060 P95",
+        "variable": "temperature",
         "unit": "°C",
         "default_rescale": [20, 45],
         "default_colormap": "turbo",
