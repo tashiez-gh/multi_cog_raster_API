@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from PIL import Image
 from rasterio.enums import Resampling
 from rasterio.warp import transform_bounds
 from rio_tiler.colormap import cmap
@@ -21,16 +23,11 @@ from rio_tiler.io import COGReader
 # ============================================================
 
 APP_TITLE = "Multi COG Raster API"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Render-safe path.
-# Default expects:
-# data/output/{dataset_name}/*.tif
 COG_ROOT = Path(os.getenv("COG_ROOT", "data/output")).resolve()
-
-# Optional. If empty, API uses current request domain.
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 
 
@@ -110,6 +107,106 @@ MONTH_NAMES = {
 }
 
 
+# Classified temperature style.
+# You can adjust these breaks later to match your QGIS QML exactly.
+TEMPERATURE_CLASSES = [
+    {
+        "label": "< 28 °C",
+        "min": None,
+        "max": 28.0,
+        "color": [49, 54, 149, 210],
+    },
+    {
+        "label": "28–30 °C",
+        "min": 28.0,
+        "max": 30.0,
+        "color": [69, 117, 180, 210],
+    },
+    {
+        "label": "30–32 °C",
+        "min": 30.0,
+        "max": 32.0,
+        "color": [116, 173, 209, 210],
+    },
+    {
+        "label": "32–34 °C",
+        "min": 32.0,
+        "max": 34.0,
+        "color": [171, 217, 233, 210],
+    },
+    {
+        "label": "34–36 °C",
+        "min": 34.0,
+        "max": 36.0,
+        "color": [255, 255, 191, 215],
+    },
+    {
+        "label": "36–38 °C",
+        "min": 36.0,
+        "max": 38.0,
+        "color": [253, 174, 97, 220],
+    },
+    {
+        "label": "38–40 °C",
+        "min": 38.0,
+        "max": 40.0,
+        "color": [244, 109, 67, 225],
+    },
+    {
+        "label": "> 40 °C",
+        "min": 40.0,
+        "max": None,
+        "color": [165, 0, 38, 230],
+    },
+]
+
+
+RAINFALL_CLASSES = [
+    {
+        "label": "0 mm",
+        "min": None,
+        "max": 0.01,
+        "color": [255, 255, 255, 0],
+    },
+    {
+        "label": "0–20 mm",
+        "min": 0.01,
+        "max": 20.0,
+        "color": [198, 219, 239, 190],
+    },
+    {
+        "label": "20–50 mm",
+        "min": 20.0,
+        "max": 50.0,
+        "color": [107, 174, 214, 200],
+    },
+    {
+        "label": "50–100 mm",
+        "min": 50.0,
+        "max": 100.0,
+        "color": [49, 130, 189, 210],
+    },
+    {
+        "label": "100–150 mm",
+        "min": 100.0,
+        "max": 150.0,
+        "color": [254, 217, 118, 220],
+    },
+    {
+        "label": "150–200 mm",
+        "min": 150.0,
+        "max": 200.0,
+        "color": [253, 141, 60, 225],
+    },
+    {
+        "label": "> 200 mm",
+        "min": 200.0,
+        "max": None,
+        "color": [189, 0, 38, 230],
+    },
+]
+
+
 # ============================================================
 # App
 # ============================================================
@@ -180,6 +277,47 @@ def get_colormap(colormap_name: str):
         )
 
 
+def resolve_style(dataset: str, style: Optional[str]) -> str:
+    """
+    style=auto:
+      - temperature -> classified
+      - rainfall -> continuous
+    """
+    config = get_dataset_config(dataset)
+    variable = config["variable"]
+
+    if style is None:
+        style = "auto"
+
+    style = style.lower().strip()
+
+    if style not in ["auto", "continuous", "classified"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid style. Use style=auto, style=continuous, or style=classified.",
+        )
+
+    if style == "auto":
+        if variable == "temperature":
+            return "classified"
+        return "continuous"
+
+    return style
+
+
+def get_classes_for_dataset(dataset: str) -> List[Dict]:
+    config = get_dataset_config(dataset)
+    variable = config["variable"]
+
+    if variable == "temperature":
+        return TEMPERATURE_CLASSES
+
+    if variable == "rainfall":
+        return RAINFALL_CLASSES
+
+    return []
+
+
 def safe_float(value) -> Optional[float]:
     if value is None:
         return None
@@ -230,18 +368,6 @@ def list_dataset_tifs(dataset: str) -> List[Path]:
 
 
 def find_month_cog(dataset: str, month: int) -> Path:
-    """
-    Find the COG file for a given month.
-
-    Supports:
-    1. One file per month:
-       something_month_01_cog.tif
-       something_m01_cog.tif
-       something_01_cog.tif
-
-    2. One 12-band file in folder:
-       if only one COG exists, this returns that file and band index is resolved later.
-    """
     validate_dataset(dataset)
 
     if month < 1 or month > 12:
@@ -249,7 +375,6 @@ def find_month_cog(dataset: str, month: int) -> Path:
 
     tif_files = list_dataset_tifs(dataset)
 
-    # If there is only one file, it may be a 12-band COG.
     if len(tif_files) == 1:
         return tif_files[0]
 
@@ -277,7 +402,6 @@ def find_month_cog(dataset: str, month: int) -> Path:
         if any(pattern in stem for pattern in month_patterns):
             return tif
 
-    # Fallback: if exactly 12 files, use sorted order.
     if len(tif_files) == 12:
         return tif_files[month - 1]
 
@@ -292,12 +416,6 @@ def find_month_cog(dataset: str, month: int) -> Path:
 
 
 def resolve_band_index(cog_path: Path, month: int, requested_bidx: Optional[int] = None) -> int:
-    """
-    If the COG has 12 bands, use month as band index.
-    If each month is a separate COG file, use band 1.
-
-    User can override with bidx.
-    """
     if requested_bidx is not None:
         return requested_bidx
 
@@ -347,14 +465,6 @@ def get_available_months(dataset: str) -> List[Dict]:
 
 @lru_cache(maxsize=512)
 def compute_cog_stats_cached(cog_path_str: str, bidx: int = 1) -> Dict:
-    """
-    Calculate approximate statistics from the actual deployed COG.
-
-    This is important because QGIS auto-stretches rasters,
-    but web tile rendering needs explicit rescale values.
-
-    The function is cached so the same dataset/month is not recalculated every tile request.
-    """
     cog_path = Path(cog_path_str)
 
     try:
@@ -421,15 +531,6 @@ def compute_cog_stats_cached(cog_path_str: str, bidx: int = 1) -> Dict:
 
 
 def get_recommended_rescale(dataset: str, cog_path: Path, bidx: int = 1) -> Tuple[float, float]:
-    """
-    Dynamic rescale logic.
-
-    Temperature:
-      Use p2-p98 because temperature has a narrow range and needs contrast.
-
-    Rainfall:
-      Use 0-p98 because rainfall should remain anchored to zero.
-    """
     config = get_dataset_config(dataset)
     variable = config["variable"]
 
@@ -459,14 +560,6 @@ def parse_rescale(
     cog_path: Optional[Path] = None,
     bidx: int = 1,
 ) -> Tuple[float, float]:
-    """
-    Supported:
-    - rescale=auto
-    - rescale=28,40
-    - rescale omitted
-
-    If omitted or auto, it uses real COG stats.
-    """
     if rescale and rescale.lower() != "auto":
         try:
             parts = [float(x.strip()) for x in rescale.split(",")]
@@ -497,14 +590,74 @@ def format_rescale(rescale_min: float, rescale_max: float) -> str:
 
 
 # ============================================================
+# Classified renderer
+# ============================================================
+
+def get_tile_alpha_mask(image_data) -> Optional[np.ndarray]:
+    """
+    Try to extract rio-tiler mask.
+    Usually 0 = transparent, 255 = valid.
+    """
+    mask = getattr(image_data, "mask", None)
+
+    if mask is None:
+        return None
+
+    mask = np.asarray(mask)
+
+    if mask.ndim == 3:
+        mask = mask[0]
+
+    return mask
+
+
+def render_classified_png(image_data, classes: List[Dict]) -> bytes:
+    """
+    Render a single-band tile into RGBA PNG using fixed class breaks.
+    """
+    arr = image_data.data
+
+    if arr.ndim == 3:
+        arr = arr[0]
+
+    arr = np.asarray(arr)
+
+    h, w = arr.shape
+
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+
+    valid_mask = np.isfinite(arr)
+
+    alpha_mask = get_tile_alpha_mask(image_data)
+    if alpha_mask is not None:
+        valid_mask = valid_mask & (alpha_mask > 0)
+
+    for item in classes:
+        min_value = item["min"]
+        max_value = item["max"]
+        color = np.array(item["color"], dtype=np.uint8)
+
+        class_mask = valid_mask.copy()
+
+        if min_value is not None:
+            class_mask = class_mask & (arr >= float(min_value))
+
+        if max_value is not None:
+            class_mask = class_mask & (arr < float(max_value))
+
+        rgba[class_mask] = color
+
+    img = Image.fromarray(rgba, mode="RGBA")
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+# ============================================================
 # Bounds helpers
 # ============================================================
 
 def get_cog_geographic_bounds(cog) -> Tuple[float, float, float, float]:
-    """
-    Return bounds in EPSG:4326 for TileJSON.
-    Compatible with different rio-tiler versions.
-    """
     bounds = cog.bounds
 
     try:
@@ -544,6 +697,7 @@ def build_tile_url(
     rescale: str,
     colormap_name: str,
     bidx: Optional[int] = None,
+    style: str = "auto",
 ) -> str:
     base_url = get_public_base_url(request)
 
@@ -551,6 +705,7 @@ def build_tile_url(
         f"{base_url}/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png"
         f"?dataset={dataset}"
         f"&month={month}"
+        f"&style={style}"
         f"&rescale={rescale}"
         f"&colormap_name={colormap_name}"
     )
@@ -568,14 +723,15 @@ def build_example_tile_url(
     rescale: str,
     colormap_name: str,
     bidx: Optional[int] = None,
+    style: str = "auto",
 ) -> str:
     base_url = get_public_base_url(request)
 
-    # Example tile around Thailand at zoom level 5.
     url = (
         f"{base_url}/cog/tiles/WebMercatorQuad/5/25/14.png"
         f"?dataset={dataset}"
         f"&month={month}"
+        f"&style={style}"
         f"&rescale={rescale}"
         f"&colormap_name={colormap_name}"
     )
@@ -593,6 +749,7 @@ def build_tilejson_url(
     rescale: str,
     colormap_name: str,
     bidx: Optional[int] = None,
+    style: str = "auto",
 ) -> str:
     base_url = get_public_base_url(request)
 
@@ -600,6 +757,7 @@ def build_tilejson_url(
         f"{base_url}/cog/tilejson.json"
         f"?dataset={dataset}"
         f"&month={month}"
+        f"&style={style}"
         f"&rescale={rescale}"
         f"&colormap_name={colormap_name}"
     )
@@ -651,7 +809,14 @@ def service_info(request: Request):
         "layers": f"{base_url}/layers",
         "datasets": f"{base_url}/datasets",
         "stats_example": f"{base_url}/cog/stats?dataset=temp_ssp585_4160_p95_cog&month=1",
-        "example_tile_auto": f"{base_url}/cog/tiles/WebMercatorQuad/5/25/14.png?dataset=temp_ssp585_4160_p95_cog&month=1&rescale=auto&colormap_name=turbo",
+        "classified_temperature_example": (
+            f"{base_url}/cog/tiles/WebMercatorQuad/5/25/14.png"
+            f"?dataset=temp_ssp585_4160_p95_cog"
+            f"&month=1"
+            f"&style=classified"
+            f"&rescale=auto"
+            f"&colormap_name=turbo"
+        ),
     }
 
 
@@ -672,6 +837,8 @@ def list_datasets():
                 + list(dataset_dir.glob("*.TIFF"))
             )
 
+        default_style = resolve_style(dataset_name, "auto")
+
         items.append(
             {
                 "name": dataset_name,
@@ -681,6 +848,10 @@ def list_datasets():
                 "default_rescale": config["default_rescale"],
                 "recommended_rescale_mode": "auto",
                 "default_colormap": config["default_colormap"],
+                "default_style": default_style,
+                "classes": get_classes_for_dataset(dataset_name)
+                if default_style == "classified"
+                else [],
                 "folder_exists": exists,
                 "file_count": tif_count,
             }
@@ -706,6 +877,7 @@ def list_layers(request: Request):
 
             colormap_name = config["default_colormap"]
             rescale = "auto"
+            style = resolve_style(dataset_name, "auto")
 
             layers.append(
                 {
@@ -720,13 +892,18 @@ def list_layers(request: Request):
                     "band_index": month_item["band_index"],
                     "default_rescale": config["default_rescale"],
                     "recommended_rescale_mode": "auto",
+                    "default_style": style,
                     "default_colormap": colormap_name,
+                    "classes": get_classes_for_dataset(dataset_name)
+                    if style == "classified"
+                    else [],
                     "tile_url_template": build_tile_url(
                         request=request,
                         dataset=dataset_name,
                         month=month_item["month"],
                         rescale=rescale,
                         colormap_name=colormap_name,
+                        style=style,
                     ),
                     "example_tile_url": build_example_tile_url(
                         request=request,
@@ -734,6 +911,7 @@ def list_layers(request: Request):
                         month=month_item["month"],
                         rescale=rescale,
                         colormap_name=colormap_name,
+                        style=style,
                     ),
                     "tilejson_url": build_tilejson_url(
                         request=request,
@@ -741,6 +919,7 @@ def list_layers(request: Request):
                         month=month_item["month"],
                         rescale=rescale,
                         colormap_name=colormap_name,
+                        style=style,
                     ),
                     "stats_url": (
                         f"{get_public_base_url(request)}/cog/stats"
@@ -765,6 +944,7 @@ def dataset_layers(dataset: str, request: Request):
 
     colormap_name = config["default_colormap"]
     rescale = "auto"
+    style = resolve_style(dataset, "auto")
 
     return {
         "dataset": dataset,
@@ -773,7 +953,9 @@ def dataset_layers(dataset: str, request: Request):
         "unit": config["unit"],
         "default_rescale": config["default_rescale"],
         "recommended_rescale_mode": "auto",
+        "default_style": style,
         "default_colormap": config["default_colormap"],
+        "classes": get_classes_for_dataset(dataset) if style == "classified" else [],
         "months": [
             {
                 **month_item,
@@ -783,6 +965,7 @@ def dataset_layers(dataset: str, request: Request):
                     month=month_item["month"],
                     rescale=rescale,
                     colormap_name=colormap_name,
+                    style=style,
                 )
                 if month_item["available"]
                 else None,
@@ -792,6 +975,7 @@ def dataset_layers(dataset: str, request: Request):
                     month=month_item["month"],
                     rescale=rescale,
                     colormap_name=colormap_name,
+                    style=style,
                 )
                 if month_item["available"]
                 else None,
@@ -801,6 +985,7 @@ def dataset_layers(dataset: str, request: Request):
                     month=month_item["month"],
                     rescale=rescale,
                     colormap_name=colormap_name,
+                    style=style,
                 )
                 if month_item["available"]
                 else None,
@@ -840,6 +1025,7 @@ def cog_stats(
     )
 
     config = SUPPORTED_DATASETS[dataset]
+    style = resolve_style(dataset, "auto")
 
     return {
         "dataset": dataset,
@@ -850,6 +1036,8 @@ def cog_stats(
         "month_name": MONTH_NAMES[month],
         "filename": cog_path.name,
         "band_index": resolved_bidx,
+        "default_style": style,
+        "classes": get_classes_for_dataset(dataset) if style == "classified" else [],
         "stats": stats,
         "recommended_rescale": [rescale_min, rescale_max],
         "recommended_rescale_text": format_rescale(rescale_min, rescale_max),
@@ -886,6 +1074,8 @@ def cog_info(
             detail=f"Cannot read COG info: {str(exc)}",
         )
 
+    style = resolve_style(dataset, "auto")
+
     return {
         "dataset": dataset,
         "month": month,
@@ -896,6 +1086,8 @@ def cog_info(
         "bounds": bounds,
         "geographic_bounds": geographic_bounds,
         "info": info,
+        "default_style": style,
+        "classes": get_classes_for_dataset(dataset) if style == "classified" else [],
         "stats": stats,
         "recommended_rescale": [rescale_min, rescale_max],
         "recommended_rescale_text": format_rescale(rescale_min, rescale_max),
@@ -907,11 +1099,14 @@ def tilejson(
     request: Request,
     dataset: str = Query(..., description="Dataset name"),
     month: int = Query(..., ge=1, le=12),
+    style: Optional[str] = Query("auto", description="auto, continuous, or classified"),
     rescale: Optional[str] = Query("auto", description="Example: 0,300 or auto"),
     colormap_name: str = Query("turbo"),
     bidx: Optional[int] = Query(None, ge=1),
 ):
     validate_dataset(dataset)
+
+    resolved_style = resolve_style(dataset, style)
 
     cog_path = find_month_cog(dataset, month)
     resolved_bidx = resolve_band_index(cog_path, month, requested_bidx=bidx)
@@ -931,6 +1126,7 @@ def tilejson(
         rescale=rescale_text,
         colormap_name=colormap_name,
         bidx=resolved_bidx,
+        style=resolved_style,
     )
 
     try:
@@ -955,6 +1151,8 @@ def tilejson(
         "minzoom": minzoom,
         "maxzoom": maxzoom,
         "attribution": "Multi COG Raster API",
+        "style": resolved_style,
+        "classes": get_classes_for_dataset(dataset) if resolved_style == "classified" else [],
     }
 
 
@@ -965,11 +1163,14 @@ def cog_tile(
     y: int,
     dataset: str = Query(..., description="Dataset name"),
     month: int = Query(..., ge=1, le=12),
+    style: Optional[str] = Query("auto", description="auto, continuous, or classified"),
     rescale: Optional[str] = Query("auto", description="Example: 0,300 or auto"),
     colormap_name: str = Query("turbo"),
     bidx: Optional[int] = Query(None, ge=1),
 ):
     validate_dataset(dataset)
+
+    resolved_style = resolve_style(dataset, style)
 
     cog_path = find_month_cog(dataset, month)
     resolved_bidx = resolve_band_index(cog_path, month, requested_bidx=bidx)
@@ -981,19 +1182,33 @@ def cog_tile(
         bidx=resolved_bidx,
     )
 
-    colormap = get_colormap(colormap_name)
-
     try:
         with COGReader(str(cog_path)) as cog:
             image = cog.tile(x, y, z, indexes=resolved_bidx)
 
-            content = image.render(
-                img_format="PNG",
-                colormap=colormap,
-                rescale=((rescale_min, rescale_max),),
-            )
+            if resolved_style == "classified":
+                classes = get_classes_for_dataset(dataset)
+                if not classes:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"No classified style configured for dataset={dataset}",
+                    )
+
+                content = render_classified_png(image, classes)
+
+            else:
+                colormap = get_colormap(colormap_name)
+
+                content = image.render(
+                    img_format="PNG",
+                    colormap=colormap,
+                    rescale=((rescale_min, rescale_max),),
+                )
 
         return Response(content=content, media_type="image/png")
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -1004,6 +1219,7 @@ def cog_tile(
                 "month": month,
                 "filename": cog_path.name,
                 "band_index": resolved_bidx,
+                "style": resolved_style,
                 "rescale": [rescale_min, rescale_max],
                 "z": z,
                 "x": x,
@@ -1018,11 +1234,14 @@ def preview_url(
     request: Request,
     dataset: str = Query(...),
     month: int = Query(..., ge=1, le=12),
+    style: Optional[str] = Query("auto", description="auto, continuous, or classified"),
     rescale: Optional[str] = Query("auto"),
     colormap_name: str = Query("turbo"),
     bidx: Optional[int] = Query(None, ge=1),
 ):
     validate_dataset(dataset)
+
+    resolved_style = resolve_style(dataset, style)
 
     cog_path = find_month_cog(dataset, month)
     resolved_bidx = resolve_band_index(cog_path, month, requested_bidx=bidx)
@@ -1035,12 +1254,16 @@ def preview_url(
     )
     rescale_text = format_rescale(rescale_min, rescale_max)
 
+    classes = get_classes_for_dataset(dataset) if resolved_style == "classified" else []
+
     return {
         "dataset": dataset,
         "month": month,
         "month_name": MONTH_NAMES[month],
         "filename": cog_path.name,
         "band_index": resolved_bidx,
+        "style": resolved_style,
+        "classes": classes,
         "rescale": [rescale_min, rescale_max],
         "rescale_text": rescale_text,
         "tile_url_template": build_tile_url(
@@ -1050,6 +1273,7 @@ def preview_url(
             rescale=rescale_text,
             colormap_name=colormap_name,
             bidx=resolved_bidx,
+            style=resolved_style,
         ),
         "example_tile_url": build_example_tile_url(
             request=request,
@@ -1058,6 +1282,7 @@ def preview_url(
             rescale=rescale_text,
             colormap_name=colormap_name,
             bidx=resolved_bidx,
+            style=resolved_style,
         ),
         "tilejson_url": build_tilejson_url(
             request=request,
@@ -1066,6 +1291,7 @@ def preview_url(
             rescale=rescale_text,
             colormap_name=colormap_name,
             bidx=resolved_bidx,
+            style=resolved_style,
         ),
         "stats_url": (
             f"{get_public_base_url(request)}/cog/stats"
