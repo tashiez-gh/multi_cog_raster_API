@@ -73,11 +73,11 @@
         <div class="grid-2">
           <div>
             <label for="rescaleMin">Min</label>
-            <input id="rescaleMin" type="number" value="0" />
+            <input id="rescaleMin" type="number" value="0" step="0.01" />
           </div>
           <div>
             <label for="rescaleMax">Max</label>
-            <input id="rescaleMax" type="number" value="300" />
+            <input id="rescaleMax" type="number" value="300" step="0.01" />
           </div>
         </div>
 
@@ -100,7 +100,7 @@
           <h2>Cloud Optimized GeoTIFF Explorer</h2>
           <p>
             Preview monthly rainfall and temperature COG layers, then copy the tile API
-            endpoint for MapLibre, Leaflet, OpenLayers, or another frontend application.
+            endpoint for MapLibre, Leaflet, OpenLayers, QGIS XYZ Tiles, or another frontend application.
           </p>
         </div>
 
@@ -139,30 +139,19 @@
         </div>
 
         <div class="map-wrap">
+          <div id="map"></div>
 
-    <div id="map"></div>
-
-    <div class="map-legend" id="mapLegend">
-
-      <div class="legend-title" id="legendTitle">Legend</div>
-
-      <div class="legend-gradient" id="legendGradient"></div>
-
-      <div class="legend-labels">
-
-        <span id="legendMin">-</span>
-
-        <span id="legendMid">-</span>
-
-        <span id="legendMax">-</span>
-
-      </div>
-
-    </div>
-
-  </div>
-
-</section>
+          <div class="map-legend" id="mapLegend">
+            <div class="legend-title" id="legendTitle">Legend</div>
+            <div class="legend-gradient" id="legendGradient"></div>
+            <div class="legend-labels">
+              <span id="legendMin">-</span>
+              <span id="legendMid">-</span>
+              <span id="legendMax">-</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section class="endpoint-card">
         <div class="endpoint-header">
@@ -175,7 +164,7 @@
         </div>
 
         <div class="api-actions">
-          <button id="copyTileTemplateBtn">Copy Tile URL Template</button>
+          <button id="copyTileTemplateBtn">Copy QGIS / Web XYZ URL</button>
           <button id="copyExampleTileBtn">Copy Example Tile URL</button>
           <button id="openExampleTileBtn">Open Example Tile</button>
           <button id="copyTileJsonBtn">Copy TileJSON URL</button>
@@ -212,6 +201,7 @@
     let currentTileTemplate = "";
     let currentExampleTileUrl = "";
     let currentTileJsonUrl = "";
+    let currentPreview = null;
 
     document.getElementById("apiBase").textContent = apiBase;
 
@@ -263,6 +253,11 @@
       showToast("Copied to clipboard");
     }
 
+    function getSelectedOption() {
+      const select = document.getElementById("datasetSelect");
+      return select.options[select.selectedIndex];
+    }
+
     function getSelectedConfig() {
       const dataset = document.getElementById("datasetSelect").value;
       const month = document.getElementById("monthSelect").value;
@@ -270,27 +265,50 @@
       const minValue = document.getElementById("rescaleMin").value;
       const maxValue = document.getElementById("rescaleMax").value;
 
+      const selectedOption = getSelectedOption();
+      const variable = selectedOption ? selectedOption.dataset.variable : "";
+      const unit = selectedOption ? selectedOption.dataset.unit : "";
+
       return {
         dataset,
         month,
         colormap,
         minValue,
         maxValue,
-        rescale: `${minValue},${maxValue}`
+        variable,
+        unit,
+        manualRescale: `${minValue},${maxValue}`
       };
     }
 
-    function buildTileTemplateUrl(config) {
-      return `${apiBase}/cog/tiles/WebMercatorQuad/{z}/{x}/{y}.png?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
+    function getRescaleMode(config) {
+      // Important:
+      // Temperature must use backend dynamic p2-p98 stretch.
+      // Rainfall can use manual/default 0-300 unless user edits it.
+      if (config.variable === "temperature") {
+        return "auto";
+      }
+
+      return config.manualRescale;
     }
 
-    function buildExampleTileUrl(config) {
-      // Example tile around Thailand.
-      return `${apiBase}/cog/tiles/WebMercatorQuad/5/25/14.png?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
-    }
+    async function getPreviewUrl(config) {
+      const rescaleValue = getRescaleMode(config);
 
-    function buildTileJsonUrl(config) {
-      return `${apiBase}/cog/tilejson.json?dataset=${encodeURIComponent(config.dataset)}&month=${config.month}&rescale=${config.rescale}&colormap_name=${config.colormap}`;
+      const url =
+        `/cog/preview-url?dataset=${encodeURIComponent(config.dataset)}` +
+        `&month=${encodeURIComponent(config.month)}` +
+        `&rescale=${encodeURIComponent(rescaleValue)}` +
+        `&colormap_name=${encodeURIComponent(config.colormap)}`;
+
+      const response = await fetch(url);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || "Cannot get preview URL");
+      }
+
+      return await response.json();
     }
 
     function buildFrontendExample(tileTemplate) {
@@ -312,15 +330,79 @@ map.addLayer({
 });`;
     }
 
-    function updateApiOutput(config) {
-      currentTileTemplate = buildTileTemplateUrl(config);
-      currentExampleTileUrl = buildExampleTileUrl(config);
-      currentTileJsonUrl = buildTileJsonUrl(config);
+    function updateApiOutputFromPreview(preview) {
+      currentPreview = preview;
+      currentTileTemplate = preview.tile_url_template || "";
+      currentExampleTileUrl = preview.example_tile_url || "";
+      currentTileJsonUrl = preview.tilejson_url || "";
 
-      document.getElementById("tileTemplateEndpoint").textContent = currentTileTemplate;
-      document.getElementById("exampleTileEndpoint").textContent = currentExampleTileUrl;
-      document.getElementById("tileJsonEndpoint").textContent = currentTileJsonUrl;
-      document.getElementById("frontendExample").textContent = buildFrontendExample(currentTileTemplate);
+      document.getElementById("tileTemplateEndpoint").textContent =
+        currentTileTemplate || "No tile endpoint generated yet.";
+
+      document.getElementById("exampleTileEndpoint").textContent =
+        currentExampleTileUrl || "No example tile generated yet.";
+
+      document.getElementById("tileJsonEndpoint").textContent =
+        currentTileJsonUrl || "No TileJSON endpoint generated yet.";
+
+      document.getElementById("frontendExample").textContent =
+        currentTileTemplate
+          ? buildFrontendExample(currentTileTemplate)
+          : "No frontend example generated yet.";
+    }
+
+    function getPreviewRescale(preview, config) {
+      // Preferred response from latest backend:
+      // preview.rescale = [min, max]
+      if (preview && Array.isArray(preview.rescale) && preview.rescale.length === 2) {
+        return [Number(preview.rescale[0]), Number(preview.rescale[1])];
+      }
+
+      // Fallback from latest backend:
+      // preview.rescale_text = "min,max"
+      if (preview && preview.rescale_text) {
+        const parts = String(preview.rescale_text).split(",").map(Number);
+        if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+          return parts;
+        }
+      }
+
+      // Final fallback to manual UI values.
+      return [Number(config.minValue), Number(config.maxValue)];
+    }
+
+    function updateLegendFromPreview(config, preview) {
+      const selectedOption = getSelectedOption();
+
+      const unit =
+        selectedOption?.dataset.displayUnit ||
+        selectedOption?.dataset.unit ||
+        config.unit ||
+        "";
+
+      const [minValue, maxValue] = getPreviewRescale(preview, config);
+      const midValue = (minValue + maxValue) / 2;
+
+      const formatValue = (value) => {
+        if (!Number.isFinite(value)) return "-";
+
+        if (unit === "°C") {
+          return `${value.toFixed(1)} ${unit}`;
+        }
+
+        if (unit === "mm") {
+          return `${Math.round(value)} ${unit}`;
+        }
+
+        return `${value.toFixed(2)} ${unit}`;
+      };
+
+      document.getElementById("legendTitle").textContent =
+        `${config.dataset} value scale`;
+
+      document.getElementById("legendMin").textContent = formatValue(minValue);
+      document.getElementById("legendMid").textContent = formatValue(midValue);
+      document.getElementById("legendMax").textContent = formatValue(maxValue);
     }
 
     async function loadDatasets() {
@@ -336,17 +418,26 @@ map.addLayer({
 
         datasets.forEach((dataset) => {
           const option = document.createElement("option");
+
           option.value = dataset.name;
           option.textContent = `${dataset.title} (${dataset.name})`;
-          option.dataset.variable = dataset.variable;
-          option.dataset.unit = dataset.unit;
-          option.dataset.displayUnit = dataset.display_unit || dataset.unit;
-          option.dataset.valueOffset = dataset.value_offset || 0;
-          option.dataset.rescaleMin = dataset.default_rescale[0];
-          option.dataset.rescaleMax = dataset.default_rescale[1];
-          option.dataset.colormap = dataset.default_colormap;
 
-select.appendChild(option);
+          option.dataset.variable = dataset.variable || "";
+          option.dataset.unit = dataset.unit || "";
+          option.dataset.displayUnit = dataset.display_unit || dataset.unit || "";
+          option.dataset.valueOffset = dataset.value_offset || 0;
+
+          option.dataset.rescaleMin = Array.isArray(dataset.default_rescale)
+            ? dataset.default_rescale[0]
+            : 0;
+
+          option.dataset.rescaleMax = Array.isArray(dataset.default_rescale)
+            ? dataset.default_rescale[1]
+            : 300;
+
+          option.dataset.colormap = dataset.default_colormap || "turbo";
+
+          select.appendChild(option);
         });
 
         document.getElementById("datasetCount").textContent = datasets.length;
@@ -360,47 +451,35 @@ select.appendChild(option);
     }
 
     function updateDefaultsFromDataset() {
-      const select = document.getElementById("datasetSelect");
-      const selectedOption = select.options[select.selectedIndex];
+      const selectedOption = getSelectedOption();
 
       if (!selectedOption) return;
+
+      const variable = selectedOption.dataset.variable;
 
       document.getElementById("rescaleMin").value = selectedOption.dataset.rescaleMin || 0;
       document.getElementById("rescaleMax").value = selectedOption.dataset.rescaleMax || 300;
       document.getElementById("colormapSelect").value = selectedOption.dataset.colormap || "turbo";
-    }
-    function updateLegend(config) {
-      const select = document.getElementById("datasetSelect");
-      const selectedOption = select.options[select.selectedIndex];
 
-      const displayUnit = selectedOption.dataset.displayUnit || "";
-      const valueOffset = Number(selectedOption.dataset.valueOffset || 0);
+      const minInput = document.getElementById("rescaleMin");
+      const maxInput = document.getElementById("rescaleMax");
 
-      const rawMin = Number(config.minValue);
-      const rawMax = Number(config.maxValue);
-      const rawMid = (rawMin + rawMax) / 2;
-
-      const displayMin = rawMin + valueOffset;
-      const displayMid = rawMid + valueOffset;
-      const displayMax = rawMax + valueOffset;
-
-      const formatValue = (value) => {
-        if (displayUnit === "°C") {
-          return `${value.toFixed(1)} ${displayUnit}`;
-        }
-
-        return `${Math.round(value)} ${displayUnit}`;
-      };
-
-      document.getElementById("legendTitle").textContent =
-        `${config.dataset} value scale`;
-
-      document.getElementById("legendMin").textContent = formatValue(displayMin);
-      document.getElementById("legendMid").textContent = formatValue(displayMid);
-      document.getElementById("legendMax").textContent = formatValue(displayMax);
+      // Temperature uses backend auto-stretch.
+      // Keep inputs visible but disabled to show they are not used directly.
+      if (variable === "temperature") {
+        minInput.disabled = true;
+        maxInput.disabled = true;
+        minInput.title = "Temperature uses backend auto rescale from actual COG statistics.";
+        maxInput.title = "Temperature uses backend auto rescale from actual COG statistics.";
+      } else {
+        minInput.disabled = false;
+        maxInput.disabled = false;
+        minInput.title = "";
+        maxInput.title = "";
+      }
     }
 
-    function loadLayer() {
+    async function loadLayer() {
       const config = getSelectedConfig();
 
       if (!config.dataset) {
@@ -408,7 +487,22 @@ select.appendChild(option);
         return;
       }
 
-      const tileTemplate = buildTileTemplateUrl(config);
+      let preview;
+
+      try {
+        preview = await getPreviewUrl(config);
+      } catch (error) {
+        console.error(error);
+        alert("Cannot load preview URL. Check /cog/preview-url or /cog/stats in API.");
+        return;
+      }
+
+      const tileTemplate = preview.tile_url_template;
+
+      if (!tileTemplate) {
+        alert("Preview URL response does not contain tile_url_template.");
+        return;
+      }
 
       if (map.getLayer("cog-layer")) {
         map.removeLayer("cog-layer");
@@ -433,11 +527,17 @@ select.appendChild(option);
         }
       });
 
-      updateApiOutput(config);
+      updateApiOutputFromPreview(preview);
+      updateLegendFromPreview(config, preview);
+
+      const [rescaleMin, rescaleMax] = getPreviewRescale(preview, config);
+      const rescaleText = Number.isFinite(rescaleMin) && Number.isFinite(rescaleMax)
+        ? `${rescaleMin.toFixed(2)}-${rescaleMax.toFixed(2)}`
+        : getRescaleMode(config);
 
       document.getElementById("activeLayerTitle").textContent = config.dataset;
       document.getElementById("activeLayerSubtitle").textContent =
-        `Month ${config.month}, colormap ${config.colormap}, rescale ${config.minValue}-${config.maxValue}`;
+        `Month ${config.month}, colormap ${config.colormap}, rescale ${rescaleText}`;
 
       document.getElementById("layerBadge").textContent = `Month ${config.month}`;
     }
