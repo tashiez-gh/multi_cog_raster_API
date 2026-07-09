@@ -70,6 +70,15 @@
           <option value="magma">magma</option>
         </select>
 
+        <label for="rangeModeSelect">Range Mode</label>
+        <select id="rangeModeSelect">
+          <option value="dynamic">Dynamic 0–p98</option>
+          <option value="standard">Standard default</option>
+          <option value="p95">Dynamic 0–p95</option>
+          <option value="max">Dynamic 0–max</option>
+          <option value="manual">Manual min/max</option>
+        </select>
+
         <div class="grid-2">
           <div>
             <label for="rescaleMin">Min</label>
@@ -144,7 +153,7 @@
           <div class="map-legend" id="mapLegend">
             <div class="legend-title" id="legendTitle">Legend</div>
             <div class="legend-gradient" id="legendGradient"></div>
-            <div class="legend-labels">
+            <div class="legend-labels" id="legendLabels">
               <span id="legendMin">-</span>
               <span id="legendMid">-</span>
               <span id="legendMax">-</span>
@@ -203,6 +212,14 @@
     let currentTileJsonUrl = "";
     let currentPreview = null;
 
+    const COLOR_RAMPS = {
+      turbo: ["#30123b", "#4145ab", "#2aa7d8", "#35d86b", "#f9e721", "#f36c21", "#7a0403"],
+      viridis: ["#440154", "#46327e", "#365c8d", "#277f8e", "#1fa187", "#4ac16d", "#a0da39", "#fde725"],
+      plasma: ["#0d0887", "#5b02a3", "#9a179b", "#cb4679", "#ed7953", "#fb9f3a", "#fdca26", "#f0f921"],
+      inferno: ["#000004", "#1b0c41", "#4a0c6b", "#781c6d", "#a52c60", "#cf4446", "#ed6925", "#fb9b06", "#f7d13d", "#fcffa4"],
+      magma: ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"]
+    };
+
     document.getElementById("apiBase").textContent = apiBase;
 
     const map = new maplibregl.Map({
@@ -212,20 +229,12 @@
         sources: {
           osm: {
             type: "raster",
-            tiles: [
-              "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-            ],
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
             tileSize: 256,
             attribution: "© OpenStreetMap contributors"
           }
         },
-        layers: [
-          {
-            id: "osm",
-            type: "raster",
-            source: "osm"
-          }
-        ]
+        layers: [{ id: "osm", type: "raster", source: "osm" }]
       },
       center: [100.8, 15.8],
       zoom: 5
@@ -237,10 +246,7 @@
       const toast = document.getElementById("toast");
       toast.textContent = message;
       toast.classList.add("show");
-
-      setTimeout(() => {
-        toast.classList.remove("show");
-      }, 1800);
+      setTimeout(() => toast.classList.remove("show"), 1800);
     }
 
     async function copyText(text) {
@@ -248,7 +254,6 @@
         alert("Please load a layer first.");
         return;
       }
-
       await navigator.clipboard.writeText(text);
       showToast("Copied to clipboard");
     }
@@ -262,9 +267,9 @@
       const dataset = document.getElementById("datasetSelect").value;
       const month = document.getElementById("monthSelect").value;
       const colormap = document.getElementById("colormapSelect").value;
+      const rangeMode = document.getElementById("rangeModeSelect").value;
       const minValue = document.getElementById("rescaleMin").value;
       const maxValue = document.getElementById("rescaleMax").value;
-
       const selectedOption = getSelectedOption();
       const variable = selectedOption ? selectedOption.dataset.variable : "";
       const unit = selectedOption ? selectedOption.dataset.unit : "";
@@ -273,6 +278,7 @@
         dataset,
         month,
         colormap,
+        rangeMode,
         minValue,
         maxValue,
         variable,
@@ -281,33 +287,35 @@
       };
     }
 
-    function getRescaleMode(config) {
-      // Important:
-      // Temperature must use backend dynamic p2-p98 stretch.
-      // Rainfall can use manual/default 0-300 unless user edits it.
-      if (config.variable === "temperature") {
-        return "auto";
-      }
+    function getStyleMode(config) {
+      if (config.variable === "temperature") return "classified";
+      return "continuous";
+    }
 
-      return config.manualRescale;
+    function getRescaleMode(config) {
+      if (config.variable === "temperature") return "auto";
+      if (config.rangeMode === "manual") return config.manualRescale;
+      return "auto";
     }
 
     async function getPreviewUrl(config) {
       const rescaleValue = getRescaleMode(config);
+      const styleValue = getStyleMode(config);
+      const rangeModeValue = config.rangeMode || "dynamic";
 
       const url =
         `/cog/preview-url?dataset=${encodeURIComponent(config.dataset)}` +
         `&month=${encodeURIComponent(config.month)}` +
+        `&style=${encodeURIComponent(styleValue)}` +
+        `&range_mode=${encodeURIComponent(rangeModeValue)}` +
         `&rescale=${encodeURIComponent(rescaleValue)}` +
         `&colormap_name=${encodeURIComponent(config.colormap)}`;
 
       const response = await fetch(url);
-
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText || "Cannot get preview URL");
       }
-
       return await response.json();
     }
 
@@ -336,69 +344,93 @@ map.addLayer({
       currentExampleTileUrl = preview.example_tile_url || "";
       currentTileJsonUrl = preview.tilejson_url || "";
 
-      document.getElementById("tileTemplateEndpoint").textContent =
-        currentTileTemplate || "No tile endpoint generated yet.";
-
-      document.getElementById("exampleTileEndpoint").textContent =
-        currentExampleTileUrl || "No example tile generated yet.";
-
-      document.getElementById("tileJsonEndpoint").textContent =
-        currentTileJsonUrl || "No TileJSON endpoint generated yet.";
-
-      document.getElementById("frontendExample").textContent =
-        currentTileTemplate
-          ? buildFrontendExample(currentTileTemplate)
-          : "No frontend example generated yet.";
+      document.getElementById("tileTemplateEndpoint").textContent = currentTileTemplate || "No tile endpoint generated yet.";
+      document.getElementById("exampleTileEndpoint").textContent = currentExampleTileUrl || "No example tile generated yet.";
+      document.getElementById("tileJsonEndpoint").textContent = currentTileJsonUrl || "No TileJSON endpoint generated yet.";
+      document.getElementById("frontendExample").textContent = currentTileTemplate ? buildFrontendExample(currentTileTemplate) : "No frontend example generated yet.";
     }
 
     function getPreviewRescale(preview, config) {
-      // Preferred response from latest backend:
-      // preview.rescale = [min, max]
       if (preview && Array.isArray(preview.rescale) && preview.rescale.length === 2) {
         return [Number(preview.rescale[0]), Number(preview.rescale[1])];
       }
 
-      // Fallback from latest backend:
-      // preview.rescale_text = "min,max"
       if (preview && preview.rescale_text) {
         const parts = String(preview.rescale_text).split(",").map(Number);
-        if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
-          return parts;
-        }
+        if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) return parts;
       }
 
-      // Final fallback to manual UI values.
       return [Number(config.minValue), Number(config.maxValue)];
     }
 
+    function updateLegendGradient(colormapName) {
+      const gradient = document.getElementById("legendGradient");
+      const colors = COLOR_RAMPS[colormapName] || COLOR_RAMPS.turbo;
+      gradient.style.background = `linear-gradient(to right, ${colors.join(", ")})`;
+    }
+
+    function resetContinuousLegendMarkup() {
+      const legendLabels = document.getElementById("legendLabels");
+      legendLabels.className = "legend-labels";
+      legendLabels.innerHTML = `
+        <span id="legendMin">-</span>
+        <span id="legendMid">-</span>
+        <span id="legendMax">-</span>
+      `;
+    }
+
+    function renderClassLegend(config, preview) {
+      const legendGradient = document.getElementById("legendGradient");
+      const legendLabels = document.getElementById("legendLabels");
+      const classes = preview.classes || [];
+
+      legendGradient.style.display = "none";
+      legendLabels.className = "legend-class-list";
+      legendLabels.innerHTML = "";
+
+      classes.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "legend-class-row";
+
+        const swatch = document.createElement("span");
+        swatch.className = "legend-class-swatch";
+
+        const color = item.color || [255, 255, 255, 255];
+        const alpha = color.length >= 4 ? color[3] / 255 : 1;
+        swatch.style.background = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`;
+
+        const label = document.createElement("span");
+        label.textContent = item.label || "Class";
+
+        row.appendChild(swatch);
+        row.appendChild(label);
+        legendLabels.appendChild(row);
+      });
+    }
+
     function updateLegendFromPreview(config, preview) {
+      document.getElementById("legendTitle").textContent = `${config.dataset} value scale`;
+
+      if (preview && Array.isArray(preview.classes) && preview.classes.length > 0) {
+        renderClassLegend(config, preview);
+        return;
+      }
+
+      document.getElementById("legendGradient").style.display = "block";
+      resetContinuousLegendMarkup();
+      updateLegendGradient(config.colormap);
+
       const selectedOption = getSelectedOption();
-
-      const unit =
-        selectedOption?.dataset.displayUnit ||
-        selectedOption?.dataset.unit ||
-        config.unit ||
-        "";
-
+      const unit = selectedOption?.dataset.displayUnit || selectedOption?.dataset.unit || config.unit || "";
       const [minValue, maxValue] = getPreviewRescale(preview, config);
       const midValue = (minValue + maxValue) / 2;
 
       const formatValue = (value) => {
         if (!Number.isFinite(value)) return "-";
-
-        if (unit === "°C") {
-          return `${value.toFixed(1)} ${unit}`;
-        }
-
-        if (unit === "mm") {
-          return `${Math.round(value)} ${unit}`;
-        }
-
+        if (unit === "°C") return `${value.toFixed(1)} ${unit}`;
+        if (unit === "mm") return `${Math.round(value)} ${unit}`;
         return `${value.toFixed(2)} ${unit}`;
       };
-
-      document.getElementById("legendTitle").textContent =
-        `${config.dataset} value scale`;
 
       document.getElementById("legendMin").textContent = formatValue(minValue);
       document.getElementById("legendMid").textContent = formatValue(midValue);
@@ -411,39 +443,27 @@ map.addLayer({
       try {
         const response = await fetch("/datasets");
         const data = await response.json();
-
         const datasets = data.datasets || [];
-
         select.innerHTML = "";
 
         datasets.forEach((dataset) => {
           const option = document.createElement("option");
-
           option.value = dataset.name;
           option.textContent = `${dataset.title} (${dataset.name})`;
-
           option.dataset.variable = dataset.variable || "";
           option.dataset.unit = dataset.unit || "";
           option.dataset.displayUnit = dataset.display_unit || dataset.unit || "";
           option.dataset.valueOffset = dataset.value_offset || 0;
-
-          option.dataset.rescaleMin = Array.isArray(dataset.default_rescale)
-            ? dataset.default_rescale[0]
-            : 0;
-
-          option.dataset.rescaleMax = Array.isArray(dataset.default_rescale)
-            ? dataset.default_rescale[1]
-            : 300;
-
+          option.dataset.rescaleMin = Array.isArray(dataset.default_rescale) ? dataset.default_rescale[0] : 0;
+          option.dataset.rescaleMax = Array.isArray(dataset.default_rescale) ? dataset.default_rescale[1] : 300;
           option.dataset.colormap = dataset.default_colormap || "turbo";
-
+          option.dataset.defaultRangeMode = dataset.default_range_mode || "dynamic";
+          option.dataset.defaultStyle = dataset.default_style || "auto";
           select.appendChild(option);
         });
 
         document.getElementById("datasetCount").textContent = datasets.length;
-
         updateDefaultsFromDataset();
-
       } catch (error) {
         console.error(error);
         select.innerHTML = "<option value=''>Cannot load datasets</option>";
@@ -452,31 +472,51 @@ map.addLayer({
 
     function updateDefaultsFromDataset() {
       const selectedOption = getSelectedOption();
-
       if (!selectedOption) return;
 
       const variable = selectedOption.dataset.variable;
+      const minInput = document.getElementById("rescaleMin");
+      const maxInput = document.getElementById("rescaleMax");
+      const rangeModeSelect = document.getElementById("rangeModeSelect");
 
-      document.getElementById("rescaleMin").value = selectedOption.dataset.rescaleMin || 0;
-      document.getElementById("rescaleMax").value = selectedOption.dataset.rescaleMax || 300;
+      minInput.value = selectedOption.dataset.rescaleMin || 0;
+      maxInput.value = selectedOption.dataset.rescaleMax || 300;
       document.getElementById("colormapSelect").value = selectedOption.dataset.colormap || "turbo";
 
+      if (variable === "temperature") {
+        rangeModeSelect.value = "dynamic";
+        rangeModeSelect.disabled = true;
+        minInput.disabled = true;
+        maxInput.disabled = true;
+        minInput.title = "Temperature uses backend classified style.";
+        maxInput.title = "Temperature uses backend classified style.";
+      } else {
+        rangeModeSelect.disabled = false;
+        rangeModeSelect.value = selectedOption.dataset.defaultRangeMode || "dynamic";
+        updateManualInputsState();
+      }
+    }
+
+    function updateManualInputsState() {
+      const selectedOption = getSelectedOption();
+      if (!selectedOption) return;
+
+      const variable = selectedOption.dataset.variable;
+      const rangeMode = document.getElementById("rangeModeSelect").value;
       const minInput = document.getElementById("rescaleMin");
       const maxInput = document.getElementById("rescaleMax");
 
-      // Temperature uses backend auto-stretch.
-      // Keep inputs visible but disabled to show they are not used directly.
       if (variable === "temperature") {
         minInput.disabled = true;
         maxInput.disabled = true;
-        minInput.title = "Temperature uses backend auto rescale from actual COG statistics.";
-        maxInput.title = "Temperature uses backend auto rescale from actual COG statistics.";
-      } else {
-        minInput.disabled = false;
-        maxInput.disabled = false;
-        minInput.title = "";
-        maxInput.title = "";
+        return;
       }
+
+      const manual = rangeMode === "manual";
+      minInput.disabled = !manual;
+      maxInput.disabled = !manual;
+      minInput.title = manual ? "Manual minimum value." : "Range is calculated by backend statistics.";
+      maxInput.title = manual ? "Manual maximum value." : "Range is calculated by backend statistics.";
     }
 
     async function loadLayer() {
@@ -488,7 +528,6 @@ map.addLayer({
       }
 
       let preview;
-
       try {
         preview = await getPreviewUrl(config);
       } catch (error) {
@@ -498,33 +537,20 @@ map.addLayer({
       }
 
       const tileTemplate = preview.tile_url_template;
-
       if (!tileTemplate) {
         alert("Preview URL response does not contain tile_url_template.");
         return;
       }
 
-      if (map.getLayer("cog-layer")) {
-        map.removeLayer("cog-layer");
-      }
+      if (map.getLayer("cog-layer")) map.removeLayer("cog-layer");
+      if (map.getSource("cog-source")) map.removeSource("cog-source");
 
-      if (map.getSource("cog-source")) {
-        map.removeSource("cog-source");
-      }
-
-      map.addSource("cog-source", {
-        type: "raster",
-        tiles: [tileTemplate],
-        tileSize: 256
-      });
-
+      map.addSource("cog-source", { type: "raster", tiles: [tileTemplate], tileSize: 256 });
       map.addLayer({
         id: "cog-layer",
         type: "raster",
         source: "cog-source",
-        paint: {
-          "raster-opacity": 0.75
-        }
+        paint: { "raster-opacity": 0.75 }
       });
 
       updateApiOutputFromPreview(preview);
@@ -535,34 +561,27 @@ map.addLayer({
         ? `${rescaleMin.toFixed(2)}-${rescaleMax.toFixed(2)}`
         : getRescaleMode(config);
 
+      const styleText = preview.style || getStyleMode(config);
+      const rangeText = preview.range_mode || config.rangeMode;
+
       document.getElementById("activeLayerTitle").textContent = config.dataset;
       document.getElementById("activeLayerSubtitle").textContent =
-        `Month ${config.month}, colormap ${config.colormap}, rescale ${rescaleText}`;
-
+        `Month ${config.month}, style ${styleText}, colormap ${config.colormap}, range ${rangeText}, rescale ${rescaleText}`;
       document.getElementById("layerBadge").textContent = `Month ${config.month}`;
     }
 
     document.getElementById("datasetSelect").addEventListener("change", updateDefaultsFromDataset);
+    document.getElementById("rangeModeSelect").addEventListener("change", updateManualInputsState);
     document.getElementById("loadLayerBtn").addEventListener("click", loadLayer);
 
-    document.getElementById("copyTileTemplateBtn").addEventListener("click", () => {
-      copyText(currentTileTemplate);
-    });
-
-    document.getElementById("copyExampleTileBtn").addEventListener("click", () => {
-      copyText(currentExampleTileUrl);
-    });
-
-    document.getElementById("copyTileJsonBtn").addEventListener("click", () => {
-      copyText(currentTileJsonUrl);
-    });
-
+    document.getElementById("copyTileTemplateBtn").addEventListener("click", () => copyText(currentTileTemplate));
+    document.getElementById("copyExampleTileBtn").addEventListener("click", () => copyText(currentExampleTileUrl));
+    document.getElementById("copyTileJsonBtn").addEventListener("click", () => copyText(currentTileJsonUrl));
     document.getElementById("openExampleTileBtn").addEventListener("click", () => {
       if (!currentExampleTileUrl) {
         alert("Please load a layer first.");
         return;
       }
-
       window.open(currentExampleTileUrl, "_blank");
     });
 
